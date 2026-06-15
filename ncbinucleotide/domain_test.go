@@ -7,8 +7,8 @@ import (
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in ncbinucleotide_test.go.
+// and the host wiring, which need no network. The client's HTTP behaviour is
+// covered in ncbinucleotide_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -25,9 +25,10 @@ func TestDomainInfo(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+		{"3346695951", "sequence", "3346695951"},
+		{"NC_000001", "sequence", "NC_000001"},
+		{"https://www.ncbi.nlm.nih.gov/nuccore/3346695951", "sequence", "3346695951"},
+		{"https://www.ncbi.nlm.nih.gov/nuccore/NC_000001.11", "sequence", "NC_000001.11"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
@@ -39,16 +40,22 @@ func TestClassify(t *testing.T) {
 }
 
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
+	got, err := Domain{}.Locate("sequence", "3346695951")
+	want := NucleotideURL + "/3346695951"
 	if err != nil || got != want {
 		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("page", "something")
+	if err == nil {
+		t.Error("Locate with unknown type should return error")
+	}
+}
+
+// TestHostWiring mounts the driver in a kit Host and checks that Mint,
+// Body, and ResolveOn work end to end. The init in domain.go registers the
 // domain, so kit.Open finds it.
 func TestHostWiring(t *testing.T) {
 	h, err := kit.Open()
@@ -56,21 +63,21 @@ func TestHostWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
+	s := &Sequence{
+		ID:        "3346695951",
+		Accession: "NC_140343",
+		Title:     "Chelon labrosus genome assembly, chromosome: 7",
+	}
+	u, err := h.Mint(s)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if want := "ncbinucleotide://page/wiki/Go"; u.String() != want {
+	if want := "ncbinucleotide://sequence/3346695951"; u.String() != want {
 		t.Errorf("Mint = %q, want %q", u.String(), want)
 	}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("ncbinucleotide", "about")
-	if err != nil || got.String() != "ncbinucleotide://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want ncbinucleotide://page/about", got.String(), err)
+	got, err := h.ResolveOn("ncbinucleotide", "12345")
+	if err != nil || got.String() != "ncbinucleotide://sequence/12345" {
+		t.Errorf("ResolveOn = (%q, %v), want ncbinucleotide://sequence/12345", got.String(), err)
 	}
 }

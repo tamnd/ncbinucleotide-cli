@@ -19,9 +19,6 @@ import (
 // ncbinucleotide:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone ncbinucleotide binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the ncbinucleotide driver. It carries no state; the per-run client is
@@ -36,40 +33,58 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "ncbinucleotide",
-			Short:  "A command line for ncbinucleotide.",
-			Long: `A command line for ncbinucleotide.
+			Short:  "Browse NCBI Nucleotide sequences from the command line.",
+			Long: `Browse NCBI Nucleotide sequences from the command line.
 
-ncbinucleotide reads public ncbinucleotide data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+ncbinucleotide reads public NCBI Nucleotide data over plain HTTPS via the
+eUtils API, shapes it into clean records, and prints output that pipes into
+the rest of your tools. No API key needed.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/ncbinucleotide-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `ncbinucleotide page` and
-	// `ant get ncbinucleotide://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "search",
+		Group:   "read",
+		List:    true,
+		Summary: "Search sequences by keyword",
+		Args:    []kit.Arg{{Name: "query", Help: "search query"}},
+	}, searchOp)
 
-	// List op: members of a page, the home of `ncbinucleotide links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// ncbinucleotide://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name:     "sequence",
+		Group:    "read",
+		Single:   true,
+		Summary:  "Fetch a sequence by numeric GI/UID",
+		URIType:  "sequence",
+		Resolver: true,
+		Args:     []kit.Arg{{Name: "uid", Help: "numeric GI / UID"}},
+	}, sequenceOp)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "organism",
+		Group:   "read",
+		List:    true,
+		Summary: "List sequences from an organism",
+		Args:    []kit.Arg{{Name: "name", Help: "organism name"}},
+	}, organismOp)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "gene",
+		Group:   "read",
+		List:    true,
+		Summary: "List sequences for a gene",
+		Args:    []kit.Arg{{Name: "name", Help: "gene name"}},
+	}, geneOp)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the Client from host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -88,86 +103,112 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type searchInput struct {
+	Query  string  `kit:"arg" help:"search query"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Start  int     `kit:"flag" help:"result offset"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type sequenceInput struct {
+	UID    string  `kit:"arg" help:"numeric GI / UID"`
+	Client *Client `kit:"inject"`
+}
+
+type organismInput struct {
+	Name   string  `kit:"arg" help:"organism name"`
 	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Start  int     `kit:"flag" help:"result offset"`
+	Client *Client `kit:"inject"`
+}
+
+type geneInput struct {
+	Name   string  `kit:"arg" help:"gene name"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Start  int     `kit:"flag" help:"result offset"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func searchOp(ctx context.Context, in searchInput, emit func(*Sequence) error) error {
+	seqs, _, err := in.Client.SearchAndFetch(ctx, in.Query, in.Limit, in.Start)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, s := range seqs {
+		if err := emit(s); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
+func sequenceOp(ctx context.Context, in sequenceInput, emit func(*Sequence) error) error {
+	uid := strings.TrimSpace(in.UID)
+	s, err := in.Client.GetSequence(ctx, uid)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(s)
+}
 
-// Classify turns any accepted input — a bare path or a full ncbinucleotide.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
+func organismOp(ctx context.Context, in organismInput, emit func(*Sequence) error) error {
+	query := in.Name + "[organism]"
+	seqs, _, err := in.Client.SearchAndFetch(ctx, query, in.Limit, in.Start)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, s := range seqs {
+		if err := emit(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func geneOp(ctx context.Context, in geneInput, emit func(*Sequence) error) error {
+	query := in.Name + "[gene name]"
+	seqs, _, err := in.Client.SearchAndFetch(ctx, query, in.Limit, in.Start)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, s := range seqs {
+		if err := emit(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Resolver: pure string functions, no network ---
+
+// Classify turns any accepted input — a bare UID or a full NCBI nuccore URL —
+// into the canonical (type, id).
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return "", "", errs.Usage("unrecognized ncbinucleotide reference: %q", input)
 	}
-	return "page", id, nil
+	// Strip URL if given.
+	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		// e.g. https://www.ncbi.nlm.nih.gov/nuccore/3346695951
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		input = parts[len(parts)-1]
+	}
+	return "sequence", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	if uriType != "sequence" {
 		return "", errs.Usage("ncbinucleotide has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
+	return NucleotideURL + "/" + id, nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// mapErr converts a library error into the appropriate kit error kind.
 func mapErr(err error) error {
 	return err
 }
